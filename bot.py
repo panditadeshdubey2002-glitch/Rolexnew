@@ -23,13 +23,13 @@ import os
 # ============================================================
 # CONFIG — Bot Token + Speed Settings
 # ============================================================
-API_TOKEN = os.environ.get("BOT_TOKEN", "8603475566:AAHctIN5YRDq5TMSnR9rnGeUPfylHUcgFJ0")
+API_TOKEN = os.environ.get("BOT_TOKEN", "8603475566:AAGMkw7EPP3JtAqU3Nkd-Ba4AXUKXXq4QHQ")
 
 if not API_TOKEN:
     try:
         from config_token import TOKEN as API_TOKEN
     except ImportError:
-        API_TOKEN = "8603475566:AAHctIN5YRDq5TMSnR9rnGeUPfylHUcgFJ0"
+        API_TOKEN = "8603475566:AAGMkw7EPP3JtAqU3Nkd-Ba4AXUKXXq4QHQ"
 
 MAX_WORKERS = 30
 SMS_MAX_WORKERS = 50
