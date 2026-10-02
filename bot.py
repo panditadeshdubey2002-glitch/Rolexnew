@@ -23,7 +23,7 @@ import os
 # ============================================================
 # CONFIG — Bot Token + Speed Settings
 # ============================================================
-API_TOKEN = os.environ.get("BOT_TOKEN", "8603475566:AAGMkw7EPP3JtAqU3Nkd-Ba4AXUKXXq4QHQ")
+API_TOKEN = os.environ.get("BOT_TOKEN")
 
 if not API_TOKEN:
     try:
